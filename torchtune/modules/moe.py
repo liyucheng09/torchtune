@@ -48,11 +48,12 @@ class MoEGate(nn.Module):
         super().__init__()
         self.num_experts_per_tok = num_experts_per_tok
         self.num_experts = num_experts
+        self.aux_loss_alpha = aux_loss_alpha
         self.weight = nn.Linear(dim, num_experts, bias=False)
     
     def forward(self, x: Tensor):
         bsz, seq_len, dim = x.shape
-        hidden_states = hidden_states.view(-1, dim)
+        hidden_states = x.view(-1, dim)
 
         logits = self.weight(hidden_states)
         scores = torch.softmax(logits, dim=-1, dtype=torch.float32)
@@ -62,7 +63,7 @@ class MoEGate(nn.Module):
         )
 
         scores = scores.view(bsz, seq_len, -1)
-        topk_indices_for_aux_loss = topk_indices.view(bsz, seq_len, -1)
+        topk_indices_for_aux_loss = topk_indices.view(bsz, -1)
         ce = torch.zeros(
             bsz, self.num_experts, device=scores.device
         )
@@ -101,6 +102,8 @@ class DeepSeekMoE(nn.Module):
             num_experts=num_experts,
             aux_loss_alpha=aux_loss_alpha,
         )
+        self.num_experts_per_tok = num_experts_per_tok
+        self.num_experts = num_experts
 
     def forward(
         self,
@@ -112,7 +115,7 @@ class DeepSeekMoE(nn.Module):
         flat_topk_indices = topk_indices.view(-1)
 
         if self.training:
-            hidden_states = hidden_states.repeat_interleave(
+            hidden_states = x.repeat_interleave(
                 self.num_experts_per_tok, dim=0
             )
             y = torch.empty_like(hidden_states)
