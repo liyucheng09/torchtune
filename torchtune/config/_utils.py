@@ -12,25 +12,22 @@ from typing import Any, Dict, List, Union
 from omegaconf import DictConfig, OmegaConf
 
 from torchtune.config._errors import InstantiationError
-from torchtune.utils import get_logger, get_world_size_and_rank
+from torchtune.utils._logging import get_logger, log_rank_zero
 
 
 def log_config(recipe_name: str, cfg: DictConfig) -> None:
     """
-    Logs the parsed config to rank zero.
+    Logs the resolved config (merged YAML file and CLI overrides) to rank zero.
 
     Args:
         recipe_name (str): name of the recipe to display
         cfg (DictConfig): parsed config object
     """
-    # Log the config only on rank 0
-    _, rank = get_world_size_and_rank()
-    if rank != 0:
-        return
-
     logger = get_logger("DEBUG")
     cfg_str = OmegaConf.to_yaml(cfg, resolve=True, sort_keys=True)
-    logger.info(msg=f"Running {recipe_name} with resolved config:\n\n{cfg_str}")
+    log_rank_zero(
+        logger=logger, msg=f"Running {recipe_name} with resolved config:\n\n{cfg_str}"
+    )
 
 
 def _has_component(node: Union[Dict[str, Any], DictConfig]) -> bool:
@@ -151,6 +148,21 @@ def _merge_yaml_and_cli_args(yaml_args: Namespace, cli_args: List[str]) -> DictC
     yaml_kwargs = vars(yaml_args)
     cli_dotlist = []
     for arg in cli_args:
+        # If CLI override uses the remove flag (~), remove the key from the yaml config
+        if arg.startswith("~"):
+            dotpath = arg[1:].split("=")[0]
+            if "_component_" in dotpath:
+                raise ValueError(
+                    f"Removing components from CLI is not supported: ~{dotpath}"
+                )
+            try:
+                _remove_key_by_dotpath(yaml_kwargs, dotpath)
+            except (KeyError, ValueError):
+                raise ValueError(
+                    f"Could not find key {dotpath} in yaml config to remove"
+                ) from None
+            continue
+        # Get other overrides that should be specified as key=value
         try:
             k, v = arg.split("=")
         except ValueError:
@@ -161,6 +173,16 @@ def _merge_yaml_and_cli_args(yaml_args: Namespace, cli_args: List[str]) -> DictC
         # key string to reflect this
         if k in yaml_kwargs and _has_component(yaml_kwargs[k]):
             k += "._component_"
+
+        # None passed via CLI will be parsed as string, but we really want OmegaConf null
+        if v == "None":
+            v = "!!null"
+
+        # TODO: this is a hack but otherwise we can't pass strings with leading zeroes
+        # to define the checkpoint file format. We manually override OmegaConf behavior
+        # by prepending the value with !!str to force a string type
+        if "max_filename" in k:
+            v = "!!str " + v
         cli_dotlist.append(f"{k}={v}")
 
     # Merge the args
@@ -169,3 +191,32 @@ def _merge_yaml_and_cli_args(yaml_args: Namespace, cli_args: List[str]) -> DictC
 
     # CLI takes precedence over yaml args
     return OmegaConf.merge(yaml_conf, cli_conf)
+
+
+def _remove_key_by_dotpath(nested_dict: Dict[str, Any], dotpath: str) -> None:
+    """
+    Removes a key specified by dotpath from a nested dict. Errors should handled by
+    the calling function.
+
+    Args:
+        nested_dict (Dict[str, Any]): Dict to remove key from
+        dotpath (str): dotpath of key to remove, e.g., "a.b.c"
+    """
+    path = dotpath.split(".")
+
+    def delete_non_component(d: Dict[str, Any], key: str) -> None:
+        if _has_component(d[key]):
+            raise ValueError(
+                f"Removing components from CLI is not supported: ~{dotpath}"
+            )
+        del d[key]
+
+    def recurse_and_delete(d: Dict[str, Any], path: List[str]) -> None:
+        if len(path) == 1:
+            delete_non_component(d, path[0])
+        else:
+            recurse_and_delete(d[path[0]], path[1:])
+            if not d[path[0]]:
+                delete_non_component(d, path[0])
+
+    recurse_and_delete(nested_dict, path)

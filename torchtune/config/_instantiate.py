@@ -5,6 +5,8 @@
 # LICENSE file in the root directory of this source tree.
 
 import copy
+import os
+import sys
 from typing import Any, Callable, Dict, Tuple
 
 from omegaconf import DictConfig, OmegaConf
@@ -16,11 +18,11 @@ def _create_component(
     _component_: Callable[..., Any],
     args: Tuple[Any, ...],
     kwargs: Dict[str, Any],
-):
+) -> Any:
     return _component_(*args, **kwargs)
 
 
-def _instantiate_node(node: DictConfig, *args: Tuple[Any, ...]):
+def _instantiate_node(node: Dict[str, Any], *args: Any) -> Any:
     """
     Creates the object specified in _component_ field with provided positional args
     and kwargs already merged. Raises an InstantiationError if _component_ is not specified.
@@ -38,8 +40,8 @@ def _instantiate_node(node: DictConfig, *args: Tuple[Any, ...]):
 
 def instantiate(
     config: DictConfig,
-    *args: Tuple[Any, ...],
-    **kwargs: Dict[str, Any],
+    *args: Any,
+    **kwargs: Any,
 ) -> Any:
     """
     Given a DictConfig with a _component_ field specifying the object to instantiate and
@@ -58,8 +60,8 @@ def instantiate(
         config (DictConfig): a single field in the OmegaConf object parsed from the yaml file.
             This is expected to have a _component_ field specifying the path of the object
             to instantiate.
-        *args (Tuple[Any, ...]): positional arguments to pass to the object to instantiate.
-        **kwargs (Dict[str, Any]): keyword arguments to pass to the object to instantiate.
+        *args (Any): positional arguments to pass to the object to instantiate.
+        **kwargs (Any): keyword arguments to pass to the object to instantiate.
 
     Examples:
         >>> config.yaml:
@@ -89,6 +91,10 @@ def instantiate(
     if not OmegaConf.is_dict(config):
         raise ValueError(f"instantiate only supports DictConfigs, got {type(config)}")
 
+    # Ensure local imports are able to be instantiated
+    if os.getcwd() not in sys.path:
+        sys.path.append(os.getcwd())
+
     config_copy = copy.deepcopy(config)
     config_copy._set_flag(
         flags=["allow_objects", "struct", "readonly"], values=[True, False, False]
@@ -103,4 +109,4 @@ def instantiate(
     # Resolve all interpolations, or references to other fields within the same config
     OmegaConf.resolve(config)
 
-    return _instantiate_node(config, *args)
+    return _instantiate_node(OmegaConf.to_object(config), *args)
